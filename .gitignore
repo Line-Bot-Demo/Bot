@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 # SpecStory explanation file
 .specstory/.what-is-this.md
+.specstory/history/2025-05-24_15-31-徵兆app-py與app-image-py的整合.md

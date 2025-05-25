@@ -69,7 +69,10 @@ class LineWebhookHandler:
             # --- 處理文字訊息事件 ---
             elif ev["type"] == "message" and ev["message"]["type"] == "text":
                 self.conversation_service.handle_message(user_id, ev["message"]["text"], reply_token)
-            # 可以添加其他事件類型 (如圖片、影片等) 的處理
+            # --- 處理圖片訊息事件 ---
+            elif ev["type"] == "message" and ev["message"]["type"] == "image":
+                self.conversation_service.handle_image_message(user_id, ev["message"]["id"], reply_token)
+            # 可以添加其他事件類型 (如影片等) 的處理
 
 # 在藍圖中定義 Webhook 路由
 @line_webhook.route("/callback", methods=["POST"])

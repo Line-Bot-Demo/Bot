@@ -1,5 +1,3 @@
-# repo-main/services/conversation_service.py
-
 import logging
 import json
 from typing import Dict, List, Any, Optional
@@ -8,7 +6,11 @@ from openai import OpenAI
 from config import Config
 from services.domain.detection.detection_service import DetectionService
 from clients.line_client import LineClient, COMMON_QR
-from linebot.models import FlexSendMessage, QuickReply # <--- 將 QuickReply 添加到這裡
+from linebot.models import FlexSendMessage, QuickReply
+from services.domain.detection.image_detection import ImageDetectionService
+import tempfile
+import requests
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ class ConversationService:
         else:
             logger.warning("ConversationService: OPENAI_API_KEY 未設定，LLM 相關功能將無法使用。")
 
+        self.image_detection_service = ImageDetectionService()
 
     def handle_message(self, user_id: str, message_text: str, reply_token: str):
         """
@@ -88,7 +91,6 @@ class ConversationService:
                 self.line_client.reply_text(reply_token, "抱歉，目前無法提供更多對話。請確認 OpenAI API Key 或配額是否正常。")
             return
 
-
         # --- 主要訊息分析流程 ---
         self.user_chat_history[user_id].append(message_text) # 儲存當前訊息
 
@@ -97,7 +99,6 @@ class ConversationService:
 
         flex_message_to_send = self._build_detection_flex_message(result) # 構建 Flex Message
         self.line_client.reply_flex(reply_token, flex_message_to_send)
-
 
     def handle_postback(self, user_id: str, data: str, reply_token: str):
         """
@@ -157,7 +158,6 @@ class ConversationService:
             logger.error(f"解釋判斷失敗：{e}", exc_info=True)
             return "抱歉，目前無法提供判斷說明。請確認 OpenAI API Key 或配額是否正常。"
 
-
     def _prevention_suggestions(self, user_id: str) -> str:
         """
         根據用戶上次的詐騙檢測結果，生成防範建議文本。
@@ -202,10 +202,6 @@ class ConversationService:
         輔助函數：從內容字典構建 FlexSendMessage。
         """
         return FlexSendMessage(alt_text=alt_text, contents=contents, quick_reply=quick_reply)
-
-    # repo-main/services/conversation_service.py
-
-    # ... 其他程式碼 ...
 
     def _build_detection_flex_message(self, result: dict) -> FlexSendMessage:
         """
@@ -255,3 +251,52 @@ class ConversationService:
 
         return self._build_flex_message_from_content(
             alt_text="詐騙偵測結果", contents=bubble_content, quick_reply=COMMON_QR)
+
+    def handle_image_message(self, user_id: str, message_id: str, reply_token: str):
+        """
+        處理接收到的圖片訊息。
+        """
+        logger.info(f"處理圖片訊息: User ID={user_id}, MessageID={message_id}")
+        # 1. 下載圖片
+        image_path = self._download_image_from_line(message_id, user_id)
+        if not image_path:
+            self.line_client.reply_text(reply_token, "無法處理圖片，請稍後再試。")
+            return
+        try:
+            # 2. 分析圖片
+            analysis_result = self.image_detection_service.analyze_image(image_path)
+            # 3. 生成回覆訊息
+            if analysis_result and analysis_result.get("is_scam"):
+                warning_msg = self.image_detection_service.generate_image_warning(analysis_result)
+                self.line_client.reply_text(reply_token, warning_msg)
+            else:
+                self.line_client.reply_text(reply_token, "圖片分析完成，未發現明顯詐騙跡象，但仍請保持警覺。")
+        finally:
+            # 4. 清理圖片
+            self.image_detection_service.cleanup_image(image_path)
+
+    def _download_image_from_line(self, message_id: str, user_id: str) -> str:
+        """
+        從 LINE 下載圖片並儲存到本地。
+        Returns: 圖片本地路徑，失敗則回傳空字串。
+        """
+        try:
+            url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
+            headers = {"Authorization": f"Bearer {Config.LINE_CHANNEL_ACCESS_TOKEN}"}
+            response = requests.get(url, headers=headers, stream=True)
+            if response.status_code == 200:
+                temp_dir = self.image_detection_service.storage_dir
+                os.makedirs(temp_dir, exist_ok=True)
+                filename = f"{user_id}_{message_id}.jpg"
+                filepath = os.path.join(temp_dir, filename)
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return filepath
+            else:
+                logger.error(f"無法獲取圖片，狀態碼：{response.status_code}")
+                return ""
+        except Exception as e:
+            logger.error(f"下載圖片時發生錯誤：{str(e)}")
+            return ""

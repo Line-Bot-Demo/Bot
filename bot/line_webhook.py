@@ -7,6 +7,8 @@ import time
 from flask import Blueprint, request, abort
 from linebot.exceptions import InvalidSignatureError
 from services.conversation_service import ConversationService # 導入對話服務
+from utils.image_handler import handle_image_message
+from clients.line_client import LineClient
 from config import Config # 導入 Config 獲取 CHANNEL_SECRET
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,7 @@ class LineWebhookHandler:
     def __init__(self, conversation_service: ConversationService, channel_secret: str):
         self.conversation_service = conversation_service
         self.channel_secret = channel_secret
+        self.client = LineClient(channel_secret)
         logger.info("LineWebhookHandler 初始化成功。")
 
     def handle_webhook_event(self, body: str, signature: str):
@@ -69,7 +72,14 @@ class LineWebhookHandler:
             # --- 處理文字訊息事件 ---
             elif ev["type"] == "message" and ev["message"]["type"] == "text":
                 self.conversation_service.handle_message(user_id, ev["message"]["text"], reply_token)
-            # 可以添加其他事件類型 (如圖片、影片等) 的處理
+
+            elif ev["message"]["type"] == "image":
+                message_id = ev["message"]["id"]
+                image_path = handle_image_message(message_id, user_id)
+                if image_path:
+                    self.conversation_service.handle_image_upload(user_id, image_path, reply_token)
+                else:
+                    self.client.reply_text(reply_token, "圖片儲存失敗，請稍後再試。")
 
 # 在藍圖中定義 Webhook 路由
 @line_webhook.route("/callback", methods=["POST"])

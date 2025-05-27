@@ -7,6 +7,7 @@ from collections import defaultdict
 from openai import OpenAI
 from config import Config
 from services.domain.detection.detection_service import DetectionService
+from services.domain.detection.image_analysis import analyze_image
 from services.gemini_client import GeminiClient
 from clients.line_client import LineClient, COMMON_QR
 from linebot.models import FlexSendMessage, QuickReply # <--- 將 QuickReply 添加到這裡
@@ -32,6 +33,7 @@ class ConversationService:
         self.STATE = defaultdict(lambda: {"risk": 0, "money_calls": 0, "last_result": {}})
         # 用於儲存用戶聊天歷史
         self.user_chat_history = defaultdict(list)
+        self.user_latest_image = {}
 
         self.openai_client = None
         if Config.OPENAI_API_KEY:
@@ -43,6 +45,33 @@ class ConversationService:
                 self.openai_client = None
         else:
             logger.warning("ConversationService: OPENAI_API_KEY 未設定，LLM 相關功能將無法使用。")
+    def handle_image_upload(self, user_id: str, image_path: str, reply_token: str):
+            """
+            處理圖片上傳後的邏輯：儲存圖片路徑 + 提供 Quick Reply
+            """
+            self.user_latest_image[user_id] = image_path
+            self.line_client.reply_text(
+                reply_token,
+                "圖片已接收！請選擇是否進行詐騙風險分析。",
+
+            )
+    def handle_image_risk_analysis(self, user_id: str, reply_token: str):
+            """
+            使用者點選『分析圖片風險』後觸發：使用 LLM 判斷圖片是否為詐騙
+            """
+            image_path = self.user_latest_image.get(user_id)
+            if not image_path:
+                self.line_client.reply_text(reply_token, "目前找不到你上傳的圖片，請重新上傳一次。")
+                return
+            analysis_result = analyze_image(image_path)
+            llm_result = self.detection_service.assess_image_risk_with_llm(analysis_result)
+
+            if llm_result.get("is_scam"):
+                reply = f"⚠️ 圖片可能與詐騙有關：{llm_result.get('reason', '原因不明')}\n請保持警覺，如有疑慮請撥打 165。"
+            else:
+                reply = "✅ 沒有發現明顯的詐騙風險，但仍請注意來源可靠性。"
+
+            self.line_client.reply_text(reply_token, reply)
 
 
     def handle_message(self, user_id: str, message_text: str, reply_token: str):
@@ -50,6 +79,13 @@ class ConversationService:
         處理接收到的文字訊息。
         """
         logger.info(f"處理訊息: User ID={user_id}, Message='{message_text}'")
+
+        if message_text in ["使用 OpenAI", "使用 Gemini"]:
+            model = "openai" if "OpenAI" in message_text else "gemini"
+            self.STATE[user_id]["model"] = model
+            logger.info(f"User {user_id} 切換模型為 {model}")
+            self.line_client.reply_text(reply_token, f"✅ 已切換為 {model.upper()} 模型")
+            return
 
         # --- 特殊指令處理：「下一段偵測」---
         if message_text == "下一段偵測":
@@ -67,13 +103,6 @@ class ConversationService:
             self.line_client.reply_flex(reply_token, self._build_flex_message_from_content(
                 alt_text="重置偵測", contents=reset_bubble_content, quick_reply=COMMON_QR))
             return
-            
-        if message_text in ["使用 OpenAI", "使用 Gemini"]:
-        model = "openai" if "OpenAI" in message_text else "gemini"
-        self.STATE[user_id]["model"] = model
-        logger.info(f"User {user_id} 切換模型為 {model}")
-        self.line_client.reply_text(reply_token, f"✅ 已切換為 {model.upper()} 模型")
-        return
 
         # --- 特殊指令處理：「聊聊更多」---
         if message_text == "聊聊更多":
@@ -82,6 +111,12 @@ class ConversationService:
             if not history:
                 self.line_client.reply_text(reply_token, "目前沒有聊天紀錄可以延伸喔！")
                 return
+        if message_text == "分析圖片風險":
+            logger.info(f"User {user_id} 請求『圖片分析』。")
+            self.handle_image_risk_analysis(user_id, reply_token)
+
+            return
+
 
             if not self.openai_client:
                 logger.warning("OpenAI 客戶端未初始化或 API Key 無效，無法提供『聊聊更多』功能。")
@@ -159,21 +194,21 @@ class ConversationService:
         prompt = (
         f"我剛剛偵測到一個訊息，分類結果為階段 {stage_num}（{stage_name_for_explain}），"
         f"觸發因子有 {trigger_factors}。請用 2～3 句話簡單說明為何會做出這樣的判斷。"
-    )
+        )
 
-    if self.gemini_client:
-        return self.gemini_client.chat(prompt)
-    elif self.openai_client:
-        try:
-            rsp = self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role":"user", "content":prompt}]
-            )
-            return rsp.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error(f"OpenAI 判斷說明失敗：{e}", exc_info=True)
+        if self.gemini_client:
+            return self.gemini_client.chat(prompt)
+        elif self.openai_client:
+            try:
+                rsp = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role":"user", "content":prompt}]
+                )
+                return rsp.choices[0].message.content.strip()
+            except Exception as e:
+                logger.error(f"OpenAI 判斷說明失敗：{e}", exc_info=True)
 
-    return "目前無法提供說明，請稍後再試。"
+        return "目前無法提供說明，請稍後再試。"
 
 
     def _prevention_suggestions(self, user_id: str) -> str:
